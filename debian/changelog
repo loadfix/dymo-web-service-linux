@@ -4,4 +4,4 @@ dymo-web-service (0.1.0-1) unstable; urgency=medium
   * Bundles mongoose (HTTP) and LibreSSL (TLS, static).
   * Cairo+Pango rendering, libqrencode for QR, hand-rolled ITF/Code128.
 
- -- Ben <noreply@localhost>  Mon, 27 Apr 2026 20:00:00 +0000
+ -- loadfix <noreply@anthropic.com>  Mon, 27 Apr 2026 20:00:00 +0000

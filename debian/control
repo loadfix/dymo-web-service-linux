@@ -1,7 +1,7 @@
 Source: dymo-web-service
 Section: utils
 Priority: optional
-Maintainer: Ben <noreply@localhost>
+Maintainer: loadfix <noreply@anthropic.com>
 Build-Depends: debhelper-compat (= 13),
                build-essential,
                pkg-config,
