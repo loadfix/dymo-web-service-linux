@@ -1,0 +1,32 @@
+Source: dymo-web-service
+Section: utils
+Priority: optional
+Maintainer: Ben <noreply@localhost>
+Build-Depends: debhelper-compat (= 13),
+               build-essential,
+               pkg-config,
+               libcairo2-dev,
+               libpango1.0-dev,
+               libexpat1-dev,
+               libqrencode-dev,
+               curl,
+               ca-certificates
+Standards-Version: 4.6.2
+Rules-Requires-Root: binary-targets
+
+Package: dymo-web-service
+Architecture: amd64
+Depends: ${shlibs:Depends},
+         ${misc:Depends},
+         cups-client,
+         printer-driver-dymo,
+         adduser
+Recommends: fonts-liberation
+Description: DYMO Connect web service emulator (Linux)
+ Emulates the local HTTP/HTTPS API that DYMO Connect for Desktop exposes
+ on Windows/Mac, so browser code using dymo.connect.framework.js (such as
+ CellarTracker) can print to a DYMO LabelWriter attached to this machine.
+ .
+ Ships with TLS statically linked against LibreSSL (no OpenSSL runtime
+ dependency) and a userscript that patches the DYMO framework so it
+ stops refusing to run on Linux.

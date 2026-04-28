@@ -1,0 +1,5 @@
+etc/dymo-web-service
+var/log/dymo-web-service
+usr/bin
+usr/share/dymo-web-service
+lib/systemd/system

@@ -1,0 +1,21 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    purge)
+        # Wipe config, logs, and the system user on full purge only.
+        rm -rf /etc/dymo-web-service
+        rm -rf /var/log/dymo-web-service
+        if getent passwd dymoweb >/dev/null; then
+            deluser --system dymoweb >/dev/null 2>&1 || true
+        fi
+        if getent group dymoweb >/dev/null; then
+            delgroup --system dymoweb >/dev/null 2>&1 || true
+        fi
+        ;;
+    remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        ;;
+esac
+
+#DEBHELPER#
+exit 0

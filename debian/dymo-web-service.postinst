@@ -1,0 +1,62 @@
+#!/bin/sh
+# Post-install: create system user, generate cert, prepare log dir.
+set -e
+
+USER=dymoweb
+CONFDIR=/etc/dymo-web-service
+LOGDIR=/var/log/dymo-web-service
+CERT=$CONFDIR/cert.pem
+KEY=$CONFDIR/key.pem
+
+case "$1" in
+    configure)
+        # Create the system user if missing. No supplementary groups: CUPS
+        # job submission via /usr/bin/lp goes through a UNIX-domain socket
+        # that any local user can connect to; `lp` group membership is only
+        # required for privileged operations like lpadmin, which we don't do.
+        if ! getent passwd "$USER" >/dev/null; then
+            adduser --system --group --no-create-home \
+                    --home /nonexistent \
+                    --shell /usr/sbin/nologin \
+                    --gecos "DYMO Web Service" "$USER"
+        fi
+
+        mkdir -p "$LOGDIR" "$CONFDIR"
+        # Captured label payloads may contain customer data (names, addresses
+        # from CellarTracker). Keep the log dir owned by the daemon user, with
+        # no group access. Admins who want to read captures can sudo or chgrp
+        # the dir themselves.
+        chown "$USER:$USER" "$LOGDIR"
+        chmod 0700 "$LOGDIR"
+
+        # Generate a self-signed cert on first install only.
+        if [ ! -f "$CERT" ] || [ ! -f "$KEY" ]; then
+            umask 077
+            openssl req -x509 -newkey rsa:2048 -sha256 \
+                -keyout "$KEY" -out "$CERT" \
+                -days 3650 -nodes \
+                -subj "/CN=dymo-web-service.localhost" \
+                -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" \
+                >/dev/null 2>&1 || {
+                    echo "warning: failed to generate TLS cert; you'll need to do it manually" >&2
+                }
+            chown root:"$USER" "$CERT" "$KEY"
+            chmod 0644 "$CERT"
+            chmod 0640 "$KEY"
+        fi
+
+        echo ""
+        echo "dymo-web-service installed."
+        echo ""
+        echo "Next steps:"
+        echo "  1. Import the TLS cert into your browser:"
+        echo "     $CERT"
+        echo "  2. Install the userscript at:"
+        echo "     file:///usr/share/dymo-web-service/cellartracker-dymo-linux.user.js"
+        echo ""
+        echo "See /usr/share/dymo-web-service/README.md for details."
+        ;;
+esac
+
+#DEBHELPER#
+exit 0

@@ -1,0 +1,7 @@
+dymo-web-service (0.1.0-1) unstable; urgency=medium
+
+  * Initial C port of the Python dymo_service.
+  * Bundles mongoose (HTTP) and LibreSSL (TLS, static).
+  * Cairo+Pango rendering, libqrencode for QR, hand-rolled ITF/Code128.
+
+ -- Ben <noreply@localhost>  Mon, 27 Apr 2026 20:00:00 +0000

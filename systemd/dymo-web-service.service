@@ -1,0 +1,57 @@
+[Unit]
+Description=DYMO Connect Web Service (Linux emulator)
+Documentation=file:///usr/share/dymo-web-service/README.md
+After=network.target cups.service
+Wants=cups.service
+
+[Service]
+Type=simple
+User=dymoweb
+Group=dymoweb
+EnvironmentFile=-/etc/dymo-web-service/dymo-web-service.conf
+ExecStart=/usr/bin/dymo-web-service
+Restart=on-failure
+RestartSec=2
+
+# --- Filesystem ---
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+ReadWritePaths=/var/log/dymo-web-service
+
+# --- Capabilities ---
+# Daemon needs none — it binds unprivileged ports and exec's /usr/bin/lp.
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+MemoryDenyWriteExecute=true
+
+# --- System calls ---
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+
+# --- Networking ---
+# IPv4 + IPv6 for the listener; UNIX for CUPS client socket.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost
+# If you flip DYMO_BIND=0.0.0.0 (with --allow-lan), also set IPAddressAllow
+# in a drop-in override to the subnet that should reach this service.
+
+[Install]
+WantedBy=multi-user.target

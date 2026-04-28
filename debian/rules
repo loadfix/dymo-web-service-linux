@@ -1,0 +1,22 @@
+#!/usr/bin/make -f
+# debian/rules — builds LibreSSL statically, then the daemon.
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	$(MAKE) bootstrap
+	$(MAKE) all
+
+override_dh_auto_install:
+	$(MAKE) install DESTDIR=$(CURDIR)/debian/dymo-web-service
+
+# LibreSSL is linked statically; there is no shared-lib runtime dep to declare.
+override_dh_shlibdeps:
+	dh_shlibdeps -- --ignore-missing-info
+
+# We ship our own systemd unit and let debhelper register it.
+override_dh_installsystemd:
+	dh_installsystemd --name=dymo-web-service

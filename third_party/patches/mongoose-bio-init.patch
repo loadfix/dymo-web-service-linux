@@ -1,0 +1,13 @@
+--- a/mongoose.c
++++ b/mongoose.c
+@@ -11229,6 +11229,10 @@ void mg_tls_init(struct mg_connection *c, const struct mg_tls_opts *opts) {
+
+   bio = BIO_new(tls->bm);
+   BIO_set_data(bio, c);
++  // LibreSSL does not mark a BIO as initialized by default; without this,
++  // BIO_read returns BIO_R_UNINITIALIZED from bio_lib.c:355 during handshake.
++  // OpenSSL is more forgiving here, but setting the flag works for both.
++  BIO_set_init(bio, 1);
+   SSL_set_bio(tls->ssl, bio, bio);
+
+   c->tls = tls;

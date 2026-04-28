@@ -1,0 +1,32 @@
+# Build artifacts
+/build/
+
+# Fetched at build time; pinned+hashed in the Makefile.
+/third_party/libressl/
+/third_party/mongoose/
+
+# Debian build outputs
+*.deb
+*.ddeb
+*.buildinfo
+*.changes
+*.dsc
+*.tar.xz
+*.tar.gz
+/debian/.debhelper/
+/debian/debhelper-build-stamp
+/debian/dymo-web-service/
+/debian/files
+/debian/*.substvars
+/debian/*.log
+
+# Editor / OS noise
+*.o
+*.a
+*.so
+*.swp
+*~
+.DS_Store
+.vscode/
+.idea/
+compile_commands.json
