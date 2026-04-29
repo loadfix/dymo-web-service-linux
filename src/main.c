@@ -34,7 +34,9 @@ static void usage(const char *argv0) {
         "  --log-dir DIR          Directory for captured payloads\n"
         "                         (default: /var/log/dymo-web-service)\n"
         "  --no-capture           Don't write PrintLabel payloads to log-dir\n"
-        "  --verbose              Enable DEBUG logging\n"
+        "  --verbose              Enable DEBUG-level logs from the daemon\n"
+        "  --debug                Also dump full request/response headers\n"
+        "                         (implies --verbose; noisy)\n"
         "  --help                 Show this help\n",
         argv0);
 }
@@ -87,7 +89,9 @@ int main(int argc, char **argv) {
                                            "https://www.cellartracker.com"),
         .allow_lan        = env_flag("DYMO_ALLOW_LAN"),
         .max_body_bytes   = 256 * 1024,
+        .debug            = env_flag("DYMO_DEBUG"),
     };
+    if (cfg.debug) log_set_level(LOG_LVL_DEBUG);
 
     // Apply env-supplied numeric fields (validated — reject garbage).
     const char *env_http  = getenv("DYMO_HTTP_PORT");
@@ -123,12 +127,13 @@ int main(int argc, char **argv) {
         {"log-dir",         required_argument, 0, 'L'},
         {"no-capture",      no_argument,       0, 'C'},
         {"verbose",         no_argument,       0, 'v'},
+        {"debug",           no_argument,       0, 'd'},
         {"help",            no_argument,       0, 'h'},
         {0},
     };
 
     int c;
-    while ((c = getopt_long(argc, argv, "b:AH:S:c:k:p:n:O:M:L:Cvh", opts, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "b:AH:S:c:k:p:n:O:M:L:Cvdh", opts, NULL)) != -1) {
         switch (c) {
             case 'b': cfg.bind_addr = optarg; break;
             case 'A': cfg.allow_lan = true; break;
@@ -155,6 +160,7 @@ int main(int argc, char **argv) {
             case 'L': cfg.log_dir = optarg; break;
             case 'C': cfg.capture_payloads = false; break;
             case 'v': log_set_level(LOG_LVL_DEBUG); break;
+            case 'd': cfg.debug = true; log_set_level(LOG_LVL_DEBUG); break;
             case 'h': usage(argv[0]); return 0;
             default:  usage(argv[0]); return 2;
         }

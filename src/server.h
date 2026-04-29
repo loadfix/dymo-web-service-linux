@@ -26,6 +26,11 @@ typedef struct {
     // Hard cap on request body size. Bodies larger than this are rejected
     // with 413. Default: 256 KiB.
     size_t max_body_bytes;
+
+    // When true, log full request headers + response headers on every HTTP
+    // request, and enable mongoose's internal debug log. Noisy; use only
+    // when diagnosing browser ↔ daemon issues.
+    bool debug;
 } server_cfg_t;
 
 int server_run(const server_cfg_t *cfg);

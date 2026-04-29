@@ -50,7 +50,7 @@ LIBRESSL_DIR     := $(THIRD_PARTY_DIR)/libressl
 LIBRESSL_SRCDIR  := $(LIBRESSL_DIR)/libressl-$(LIBRESSL_VERSION)
 LIBRESSL_PREFIX  := $(abspath $(LIBRESSL_DIR)/install)
 LIBRESSL_STAMP   := $(LIBRESSL_DIR)/.built-$(LIBRESSL_VERSION)
-LIBRESSL_LIBS    := $(LIBRESSL_PREFIX)/lib/libssl.a $(LIBRESSL_PREFIX)/lib/libcrypto.a
+LIBRESSL_LIBS    := $(LIBRESSL_PREFIX)/lib/libtls.a $(LIBRESSL_PREFIX)/lib/libssl.a $(LIBRESSL_PREFIX)/lib/libcrypto.a
 
 MONGOOSE_DIR     := $(THIRD_PARTY_DIR)/mongoose
 MONGOOSE_SRC     := $(MONGOOSE_DIR)/mongoose.c
@@ -70,10 +70,12 @@ WARN_FLAGS       := -Wall -Wextra -Wno-unused-parameter -Wpointer-arith -Wshadow
 OPT_FLAGS        ?= -O2 -g
 STD_FLAGS        := -std=c11 -D_GNU_SOURCE
 
-# Mongoose feature flags: enable TLS via OpenSSL-compatible API (LibreSSL is
-# source-compatible for the routines we use), disable features we don't need.
+# We no longer use mongoose's TLS at all — HTTPS is served by src/tls_server.c
+# using LibreSSL's native libtls API, which writes directly to the socket fd
+# and matches the on-wire behaviour of uvicorn / mainstream servers.
+# Mongoose is still used for the plain-HTTP port 41951.
 MONGOOSE_FLAGS   := \
-	-DMG_TLS=MG_TLS_OPENSSL \
+	-DMG_TLS=MG_TLS_NONE \
 	-DMG_ENABLE_PACKED_FS=0 \
 	-DMG_ENABLE_DIRLIST=0
 
@@ -99,6 +101,7 @@ LDLIBS_BASE      := \
 SRC_FILES := \
 	src/main.c \
 	src/server.c \
+	src/tls_server.c \
 	src/http.c \
 	src/xml_parse.c \
 	src/render.c \
@@ -145,8 +148,7 @@ $(MONGOOSE_SRC) $(MONGOOSE_HDR): | $(MONGOOSE_DIR)
 	@echo "[verify] mongoose sha256"
 	@echo "$(MONGOOSE_H_SHA256)  $(MONGOOSE_HDR)" | sha256sum -c -
 	@echo "$(MONGOOSE_C_SHA256)  $(MONGOOSE_SRC)" | sha256sum -c -
-	@echo "[patch] mongoose: BIO_set_init for LibreSSL"
-	cd $(MONGOOSE_DIR) && patch -p1 < ../patches/mongoose-bio-init.patch
+	@# mongoose TLS is disabled (MG_TLS_NONE); no BIO patch needed.
 
 $(MONGOOSE_DIR):
 	mkdir -p $@

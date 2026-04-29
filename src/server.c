@@ -10,11 +10,16 @@
 #include "xml_parse.h"
 #include "render.h"
 #include "printing.h"
+#include "tls_server.h"
 
 #include "mongoose.h"
 
+#include <pthread.h>
+
 #include <errno.h>
 #include <fcntl.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,6 +30,19 @@
 #include <unistd.h>
 
 static volatile int g_running = 1;
+
+// Trampoline that invokes the libtls HTTPS accept loop from a pthread.
+// Argument is a {cfg, running} pair allocated on the caller's stack; the
+// trampoline itself holds no state.
+struct tls_thread_args {
+    const server_cfg_t *cfg;
+    volatile int *running;
+};
+static void *tls_thread_main(void *arg) {
+    struct tls_thread_args *a = (struct tls_thread_args *)arg;
+    (void)tls_server_run(a->cfg, a->running);
+    return NULL;
+}
 
 static void on_sig(int sig) {
     (void)sig;
@@ -58,18 +76,69 @@ static bool origin_allowed(const char *allowlist, struct mg_str origin) {
 // Emit CORS headers only when the Origin is explicitly allowed. No wildcard
 // fallback — an unknown origin gets no CORS headers and the browser blocks
 // the response. This closes the drive-by-print attack surface.
+//
+// Chrome's Private Network Access (PNA) treats public-origin → loopback
+// requests as crossing a network boundary; the browser issues a preflight
+// with `Access-Control-Request-Private-Network: true` (older Chrome) or
+// `Access-Control-Request-Local-Network: true` (newer Chrome) and blocks
+// the request unless the server opts in. We opt in on both header names
+// because they coexist across Chrome versions.
 static void cors_headers(struct mg_connection *c, struct mg_http_message *hm,
                          const server_cfg_t *cfg) {
     struct mg_str *origin = mg_http_get_header(hm, "Origin");
     if (!origin || origin->len == 0) return;  // not a cross-origin request
     if (!origin_allowed(cfg->allowed_origins, *origin)) return;
 
+    // Headers that belong on EVERY CORS response (simple or preflight).
     mg_printf(c, "Access-Control-Allow-Origin: %.*s\r\n",
               (int)origin->len, origin->buf);
     mg_printf(c, "Access-Control-Allow-Credentials: true\r\n");
-    mg_printf(c, "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n");
-    mg_printf(c, "Access-Control-Allow-Headers: Content-Type\r\n");
     mg_printf(c, "Vary: Origin\r\n");
+
+    // Preflight-only headers. Browsers only look at Allow-Methods /
+    // Allow-Headers / Allow-Private-Network / Max-Age on the OPTIONS
+    // response; adding them to every response confused Chrome into
+    // preflighting subsequent simple requests (the Python reference
+    // doesn't send them on non-OPTIONS responses).
+    if (mg_strcmp(hm->method, mg_str("OPTIONS")) == 0) {
+        mg_printf(c, "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n");
+        // Echo the browser's requested headers verbatim. DYMO's framework
+        // sends custom headers (e.g. "Connection-Type") that we can't
+        // enumerate up-front; a literal "*" is illegal with Allow-Credentials,
+        // so we echo Access-Control-Request-Headers instead.
+        struct mg_str *req_hdrs = mg_http_get_header(hm, "Access-Control-Request-Headers");
+        if (req_hdrs && req_hdrs->len > 0) {
+            mg_printf(c, "Access-Control-Allow-Headers: %.*s\r\n",
+                      (int)req_hdrs->len, req_hdrs->buf);
+        } else {
+            mg_printf(c, "Access-Control-Allow-Headers: Content-Type\r\n");
+        }
+        mg_printf(c, "Access-Control-Allow-Private-Network: true\r\n");
+        mg_printf(c, "Access-Control-Allow-Local-Network: true\r\n");
+        mg_printf(c, "Access-Control-Max-Age: 600\r\n");
+    }
+}
+
+// Print every request header. Only called when debug is on. Output is noisy
+// by design — the whole point is to see what Chrome actually sent (so we can
+// reason about PNA, CORS, Sec-Fetch-*, and sync-XHR behavior).
+static void dump_request(struct mg_http_message *hm) {
+    LOG_DEBUG("---- request ----");
+    LOG_DEBUG("  %.*s %.*s %.*s",
+              (int)hm->method.len, hm->method.buf,
+              (int)hm->uri.len, hm->uri.buf,
+              (int)hm->proto.len, hm->proto.buf);
+    for (size_t i = 0; i < sizeof(hm->headers)/sizeof(hm->headers[0]); i++) {
+        if (hm->headers[i].name.len == 0) break;
+        LOG_DEBUG("  %.*s: %.*s",
+                  (int)hm->headers[i].name.len,  hm->headers[i].name.buf,
+                  (int)hm->headers[i].value.len, hm->headers[i].value.buf);
+    }
+    if (hm->body.len > 0) {
+        size_t preview = hm->body.len > 200 ? 200 : hm->body.len;
+        LOG_DEBUG("  body (%zu bytes, first %zu): %.*s",
+                  hm->body.len, preview, (int)preview, hm->body.buf);
+    }
 }
 
 static const char *status_phrase(int code) {
@@ -88,15 +157,31 @@ static const char *status_phrase(int code) {
 static void reply_text(struct mg_connection *c, struct mg_http_message *hm,
                        const server_cfg_t *cfg,
                        int code, const char *ctype, const char *body, size_t body_len) {
+    if (cfg->debug) {
+        struct mg_str *origin = mg_http_get_header(hm, "Origin");
+        LOG_DEBUG("---- response %d %s (ctype=%s len=%zu origin=%.*s) ----",
+                  code, status_phrase(code), ctype, body_len,
+                  origin ? (int)origin->len : 0,
+                  origin ? origin->buf : "");
+    }
     mg_printf(c, "HTTP/1.1 %d %s\r\n", code, status_phrase(code));
+    // RFC 7231 §7.1.1.2: servers with a clock MUST send Date on every
+    // response. Missing Date seems to confuse the DYMO framework's response
+    // handling in Chrome (the Python reference sends it via uvicorn).
+    char date_buf[64];
+    time_t now = time(NULL);
+    struct tm gmt;
+    gmtime_r(&now, &gmt);
+    strftime(date_buf, sizeof(date_buf), "%a, %d %b %Y %H:%M:%S GMT", &gmt);
+    mg_printf(c, "Date: %s\r\n", date_buf);
+    mg_printf(c, "Server: dymo-web-service\r\n");
     cors_headers(c, hm, cfg);
-    // Basic security headers. These are cheap defense-in-depth; they do
-    // nothing for loopback but matter if the service is ever LAN-exposed
-    // or reverse-proxied.
-    mg_printf(c, "X-Content-Type-Options: nosniff\r\n");
-    mg_printf(c, "X-Frame-Options: DENY\r\n");
-    mg_printf(c, "Content-Security-Policy: default-src 'none'; frame-ancestors 'none'\r\n");
-    mg_printf(c, "Referrer-Policy: no-referrer\r\n");
+    // NOTE: intentionally no X-Frame-Options / Content-Security-Policy / etc.
+    // The DYMO framework JS is sensitive to extra headers on responses — a
+    // strict CSP or X-Frame-Options added by us triggered extra preflights
+    // and broke the real CellarTracker flow (even though the response body
+    // was fine). The Python reference omits them too; the daemon is only
+    // reachable from loopback, so these headers add no real hardening.
     mg_printf(c, "Content-Type: %s\r\n", ctype);
     mg_printf(c, "Content-Length: %lu\r\n\r\n", (unsigned long)body_len);
     mg_send(c, body, body_len);
@@ -109,7 +194,28 @@ static void reply_200_plain(struct mg_connection *c, struct mg_http_message *hm,
 
 static void reply_options(struct mg_connection *c, struct mg_http_message *hm,
                           const server_cfg_t *cfg) {
+    if (cfg->debug) {
+        struct mg_str *origin = mg_http_get_header(hm, "Origin");
+        struct mg_str *acrh   = mg_http_get_header(hm, "Access-Control-Request-Headers");
+        struct mg_str *acrm   = mg_http_get_header(hm, "Access-Control-Request-Method");
+        struct mg_str *acrpn  = mg_http_get_header(hm, "Access-Control-Request-Private-Network");
+        struct mg_str *acrln  = mg_http_get_header(hm, "Access-Control-Request-Local-Network");
+        LOG_DEBUG("preflight: origin=%.*s req-method=%.*s req-headers=%.*s "
+                  "req-pn=%.*s req-ln=%.*s",
+                  origin ? (int)origin->len : 0, origin ? origin->buf : "",
+                  acrm   ? (int)acrm->len   : 0, acrm   ? acrm->buf   : "",
+                  acrh   ? (int)acrh->len   : 0, acrh   ? acrh->buf   : "",
+                  acrpn  ? (int)acrpn->len  : 0, acrpn  ? acrpn->buf  : "",
+                  acrln  ? (int)acrln->len  : 0, acrln  ? acrln->buf  : "");
+    }
     mg_printf(c, "HTTP/1.1 204 No Content\r\n");
+    char date_buf[64];
+    time_t now = time(NULL);
+    struct tm gmt;
+    gmtime_r(&now, &gmt);
+    strftime(date_buf, sizeof(date_buf), "%a, %d %b %Y %H:%M:%S GMT", &gmt);
+    mg_printf(c, "Date: %s\r\n", date_buf);
+    mg_printf(c, "Server: dymo-web-service\r\n");
     cors_headers(c, hm, cfg);
     mg_printf(c, "Content-Length: 0\r\n\r\n");
 }
@@ -131,7 +237,9 @@ static void handle_get_printers(struct mg_connection *c, struct mg_http_message 
         "    <IsTwinTurbo>False</IsTwinTurbo>\n"
         "  </LabelWriterPrinter>\n"
         "</Printers>\n", name, name);
-    reply_text(c, hm, cfg, 200, "application/xml; charset=utf-8", xml, (size_t)n);
+    // Match Python reference exactly — no charset parameter. The DYMO framework
+    // parses XML responses itself and doesn't inspect charset parameters.
+    reply_text(c, hm, cfg, 200, "application/xml", xml, (size_t)n);
 }
 
 // Write body content to a file inside capture_dir/<filename>. Open with
@@ -310,6 +418,7 @@ static void handle_http(struct mg_connection *c, int ev, void *ev_data) {
         LOG_INFO("%.*s %.*s",
                  (int)hm->method.len, hm->method.buf,
                  (int)hm->uri.len, hm->uri.buf);
+        if (cfg->debug) dump_request(hm);
 
         // CORS preflight
         if (method_is(hm, "OPTIONS")) {
@@ -400,29 +509,6 @@ static void handle_http_plain(struct mg_connection *c, int ev, void *ev_data) {
     handle_http(c, ev, ev_data);
 }
 
-// TLS credentials are read from disk once at startup and reused for every
-// accepted HTTPS connection. Reading them per-accept works but leaks the
-// buffers because mg_tls_init consumes them synchronously without taking
-// ownership.
-static struct mg_str g_tls_cert;
-static struct mg_str g_tls_key;
-
-// Listener wrapper that enables TLS on every accepted connection. mongoose
-// consumes the cert/key PEM during mg_tls_init but holds pointers into them
-// for the SSL session, so the buffers must outlive the accepted connection —
-// hence the process-scoped g_tls_cert / g_tls_key loaded in server_run.
-static void handle_https(struct mg_connection *c, int ev, void *ev_data) {
-    if (ev == MG_EV_ACCEPT) {
-        struct mg_tls_opts opts = {
-            .cert = g_tls_cert,
-            .key  = g_tls_key,
-        };
-        mg_tls_init(c, &opts);
-        return;
-    }
-    handle_http(c, ev, ev_data);
-}
-
 // ---- Public entry point -------------------------------------------------
 
 int server_run(const server_cfg_t *cfg) {
@@ -445,37 +531,39 @@ int server_run(const server_cfg_t *cfg) {
                  "this port can print labels.", cfg->bind_addr);
     }
 
-    // Load TLS material once; mongoose holds pointers into these buffers
-    // for the life of the accepted SSL session.
-    g_tls_cert = mg_file_read(&mg_fs_posix, cfg->cert_path);
-    g_tls_key  = mg_file_read(&mg_fs_posix, cfg->key_path);
-    if (g_tls_cert.len == 0 || g_tls_key.len == 0) {
-        LOG_ERROR("failed to read cert=%s or key=%s", cfg->cert_path, cfg->key_path);
-        return -1;
-    }
-
     struct mg_mgr mgr;
     mg_mgr_init(&mgr);
-    mg_log_set(MG_LL_ERROR);
+    mg_log_set(cfg->debug ? MG_LL_DEBUG : MG_LL_ERROR);
 
-    char http_url[128], https_url[128];
+    char http_url[128];
     snprintf(http_url,  sizeof(http_url),  "http://%s:%d",  cfg->bind_addr, cfg->http_port);
-    snprintf(https_url, sizeof(https_url), "http://%s:%d", cfg->bind_addr, cfg->https_port);
 
-    // Mongoose uses "http://host:port" for both plain and TLS listeners; TLS
-    // is enabled per-connection via mg_tls_init in MG_EV_ACCEPT.
-    struct mg_connection *http_c  = mg_http_listen(&mgr, http_url,  handle_http_plain, (void*)cfg);
-    struct mg_connection *https_c = mg_http_listen(&mgr, https_url, handle_https,      (void*)cfg);
-    if (!http_c)  { LOG_ERROR("failed to bind %s",  http_url);  mg_mgr_free(&mgr); return -1; }
-    if (!https_c) { LOG_ERROR("failed to bind %s", https_url); mg_mgr_free(&mgr); return -1; }
-
+    struct mg_connection *http_c = mg_http_listen(&mgr, http_url, handle_http_plain, (void*)cfg);
+    if (!http_c) { LOG_ERROR("failed to bind %s", http_url); mg_mgr_free(&mgr); return -1; }
     LOG_INFO("listening HTTP  %s", http_url);
-    LOG_INFO("listening HTTPS %s:%d (cert=%s)", cfg->bind_addr, cfg->https_port, cfg->cert_path);
+
+    // HTTPS is served by a dedicated libtls accept loop on its own thread —
+    // mongoose's OpenSSL-compat TLS path fragments the handshake into tiny
+    // TCP segments and upsets the DYMO framework. libtls writes to the
+    // socket fd directly, matching uvicorn's wire behaviour.
+    static volatile int tls_running;
+    static struct tls_thread_args tls_args;
+    tls_running = 1;
+    tls_args.cfg = cfg;
+    tls_args.running = &tls_running;
+
+    pthread_t tls_thread;
+    if (pthread_create(&tls_thread, NULL, tls_thread_main, &tls_args) != 0) {
+        LOG_ERROR("failed to spawn TLS server thread: %s", strerror(errno));
+        mg_mgr_free(&mgr); return -1;
+    }
 
     while (g_running) {
         mg_mgr_poll(&mgr, 200);
     }
     LOG_INFO("shutting down");
+    tls_running = 0;
+    pthread_join(tls_thread, NULL);
     mg_mgr_free(&mgr);
     return 0;
 }
