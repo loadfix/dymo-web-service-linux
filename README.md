@@ -27,16 +27,18 @@ Three pieces have to cooperate:
 
 1. **The daemon** (this repo) — a small C HTTP/HTTPS server that emulates
    DYMO Connect's API, renders `.label` XML + LabelSet to a 1-bit PNG,
-   and hands it to CUPS via `lp`.
-2. **The userscript** at
-   [`userscript/cellartracker-dymo-linux.user.js`](userscript/cellartracker-dymo-linux.user.js)
-   — CellarTracker's page-level JS refuses to run on Linux before
-   contacting the service. The userscript patches the framework in-page
-   so it stops refusing.
-3. **A patched DYMO CUPS driver** — the stock Ubuntu `printer-driver-dymo`
+   and hands it to CUPS via `lp`. With CellarTracker as the client,
+   nothing on the browser side needs to be installed beyond trusting
+   the TLS cert (see below).
+2. **A patched DYMO CUPS driver** — the stock Ubuntu `printer-driver-dymo`
    has a zombie-job bug that leaves `lpstat` stuck on "now printing"
    after a successful print. A fork with that bug fixed lives at
    [loadfix/dymo-cups-drivers](https://github.com/loadfix/dymo-cups-drivers).
+3. **(Optional) userscript** at
+   [`userscript/cellartracker-dymo-linux.user.js`](userscript/cellartracker-dymo-linux.user.js)
+   — kept around for sites that gate DYMO support on a browser OS sniff.
+   CellarTracker's current framework (v3.0.0) does not; the userscript
+   is not required for CellarTracker.
 
 ---
 
@@ -90,11 +92,17 @@ TLS and HTTP are not in this list:
   (SHA256-pinned in the Makefile), built with `--disable-shared`, and
   statically linked into the binary. The resulting `.deb` has no
   `libssl3`/`libssl-dev` runtime dependency.
+  HTTPS uses LibreSSL's native **`libtls`** API (`tls_server`,
+  `tls_accept_socket`, `tls_read`/`tls_write`) in a dedicated accept
+  thread, one worker thread per connection. See
+  [`src/tls_server.c`](src/tls_server.c) — why this matters is in the
+  comment at the top of that file.
 - **[Mongoose 7.21](https://github.com/cesanta/mongoose/)** is fetched at
   build time (commit SHA pinned, both files SHA256-checked) and compiled
-  into the daemon as a single translation unit. One small patch is
-  applied (`third_party/patches/mongoose-bio-init.patch`) to make the
-  custom BIO work with LibreSSL's stricter init check.
+  into the daemon as a single translation unit. Mongoose is used only
+  for the plain-HTTP listener on port 41951 and for its HTTP message
+  parser — its own TLS implementation is disabled
+  (`-DMG_TLS=MG_TLS_NONE`).
 
 ---
 
@@ -150,21 +158,13 @@ HTTPS before HTTP, so the cert has to be pre-trusted:
   Check "Trust this CA to identify websites."
 - *Chrome/Chromium:* `chrome://settings/certificates` → Authorities → Import.
 
-**2. Install the userscript.** CellarTracker's JS does an OS sniff and
-refuses to run on Linux *before* it probes the local service. A
-userscript manager (Violentmonkey / Tampermonkey / Greasemonkey) is
-required to patch the framework in-page. Navigate to:
-
-```
-file:///usr/share/dymo-web-service/cellartracker-dymo-linux.user.js
-```
-
-— the userscript manager will offer to install. Then visit
-CellarTracker and verify in devtools:
-
-```
-[dymo-linux] framework patched — Linux web service enabled
-```
+**2. (Optional) install the userscript** at
+`file:///usr/share/dymo-web-service/cellartracker-dymo-linux.user.js`
+via a userscript manager (Violentmonkey / Tampermonkey / Greasemonkey).
+It patches the DYMO framework in-page to bypass OS sniffs on sites that
+gate DYMO support that way. CellarTracker's current framework (v3.0.0)
+does **not** require this — you can skip the userscript and go straight
+to `https://www.cellartracker.com/dymo.asp` once the cert is trusted.
 
 ---
 
@@ -198,8 +198,9 @@ sudo systemctl restart dymo-web-service
 - Is the daemon running? `systemctl status dymo-web-service`
 - Is the cert trusted? Visiting `https://127.0.0.1:41952/DYMO/DLS/Printing/Check`
   should show `true` without a cert warning.
-- Is the userscript loaded? Console should show
-  `[dymo-linux] framework patched`.
+- Run the troubleshooter at `https://www.cellartracker.com/dymo.asp` →
+  *Check Installation*. It should report `Browser: true`, `Framework: true`,
+  `Web Service: true`, find 1 printer, and finish with `All seems OK`.
 
 **"now printing" stuck forever after a successful print**
 

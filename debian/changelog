@@ -1,3 +1,17 @@
+dymo-web-service (0.1.1-1) unstable; urgency=medium
+
+  * HTTPS served via LibreSSL's native libtls API in a dedicated thread.
+    The previous mongoose OpenSSL-compat path fragmented the TLS
+    handshake into tiny TCP segments, which tripped the DYMO framework's
+    XHR state machine on CellarTracker. libtls writes directly to the
+    socket fd and matches the on-wire behaviour of uvicorn / mainstream
+    servers.
+  * Mongoose is now built with MG_TLS=MG_TLS_NONE; it is used only for
+    the plain-HTTP listener on port 41951. The mongoose BIO patch is no
+    longer applied.
+
+ -- loadfix <noreply@anthropic.com>  Tue, 29 Apr 2026 21:30:00 +0000
+
 dymo-web-service (0.1.0-1) unstable; urgency=medium
 
   * Initial C port of the Python dymo_service.
